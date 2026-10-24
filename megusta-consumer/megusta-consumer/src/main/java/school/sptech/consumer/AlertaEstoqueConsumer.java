@@ -15,13 +15,12 @@ public class AlertaEstoqueConsumer {
  }
  @RabbitListener(queues="${megusta.rabbitmq.queue}")
  public void consumir(Message message) throws Exception {
-  // Lê diretamente os bytes JSON; não depende do __TypeId__ do pacote do producer.
+
   AlertaEstoqueMensagem dto=mapper.readValue(message.getBody(), AlertaEstoqueMensagem.class);
   String resumo=MensagemFormatter.resumo(dto);
   String telefone=MensagemFormatter.telefone(dto.telefone());
   String id=whatsapp.enviar(telefone, resumo);
   log.info("Notificação aceita pela API do WhatsApp. ID: {}", id);
-  // AUTO confirma no RabbitMQ somente depois do retorno sem exceção.
-  // Não capturar e suprimir erros aqui: eles precisam chegar ao retry/DLQ.
+  
  }
 }

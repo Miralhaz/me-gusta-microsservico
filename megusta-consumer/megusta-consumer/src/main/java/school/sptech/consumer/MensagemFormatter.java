@@ -22,7 +22,6 @@ public final class MensagemFormatter {
   String result = m.alertas().stream().map(a -> limpar(a.nome()) + " (" + limpar(a.codigoInsumo())
       + "): atual " + numero(a.qtdAtual()) + ", mínimo " + numero(a.estoqueMinimo()))
       .collect(Collectors.joining("; "));
-  // Uma variável de template, em linha única. Não descartar itens silenciosamente.
   if (result.length() > 800) throw new IllegalArgumentException("Resumo excede 800 caracteres; dividir no producer");
   return result;
  }
