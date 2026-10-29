@@ -4,7 +4,7 @@ import java.util.List;
 
 
 public record AlertaEstoqueMensagem(
-        String telefone,
+        String email,
         List<AlertaEstoque> alertas
 ) {
 }
