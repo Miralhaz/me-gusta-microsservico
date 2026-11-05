@@ -1,14 +1,17 @@
 package school.sptech.consumer;
 import school.sptech.megusta.notificacao.AlertaEstoqueMensagem;
 import java.math.BigDecimal;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 public final class MensagemFormatter {
+ private static final Pattern EMAIL = Pattern.compile("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$");
  private MensagemFormatter() {}
- public static String telefone(String value) {
-  if (value == null || !value.matches("[+0-9() .-]+")) throw new IllegalArgumentException("Telefone inválido");
-  String digits = value.replaceAll("[^0-9]", "");
-  if (!digits.matches("[1-9][0-9]{7,14}")) throw new IllegalArgumentException("Use telefone internacional com DDI");
-  return digits;
+ public static String email(String value) {
+  if (value == null) throw new IllegalArgumentException("E-mail inválido");
+  String normalized = value.trim();
+  if (normalized.isBlank() || normalized.length() > 254 || !EMAIL.matcher(normalized).matches())
+   throw new IllegalArgumentException("E-mail inválido");
+  return normalized;
  }
  public static String resumo(AlertaEstoqueMensagem m) {
   if (m == null || m.alertas() == null || m.alertas().isEmpty()) throw new IllegalArgumentException("Alertas vazios");

@@ -1,55 +1,89 @@
-# Me Gusta — Consumer de alertas para WhatsApp
+# Me Gusta — Consumer de alertas de estoque por e-mail
 
-Projeto independente **Java 21 / Spring Boot 3.5.13**. Inclui Maven Wrapper da base e Dockerfile com Java 21. 
+Projeto independente **Java 21 / Spring Boot 3.5.13**. Inclui Maven Wrapper e Dockerfile com Java 21.
 
-O consumer não precisa de MySQL, JPA, endpoints HTTP nem JWT. 
-As dependências incluem somente mensageria, JSON e testes. 
+O consumer não precisa de MySQL, JPA, endpoints HTTP nem JWT. As dependências incluem mensageria RabbitMQ, Jackson e Spring Mail (SMTP).
 
 ## Como funciona
 
-RabbitAlertaEstoquePublisher do backend → topic exchange → fila deste consumer → AlertaEstoqueConsumer → ObjectMapper → WhatsAppService → API oficial da Meta.
+```
+VerificacaoEstoqueScheduler (backend, 07:00)
+  → NotificacaoEstoqueService
+  → RabbitAlertaEstoquePublisher
+  → exchange megusta.estoque (routing key alerta.estoque)
+  → fila megusta.email.alertas
+  → AlertaEstoqueConsumer
+  → MensagemFormatter (validação e resumo)
+  → EmailService
+  → servidor SMTP
+```
 
-O producer já serializa AlertaEstoqueMensagem para JSON. Não existe arquivo PDF, Excel, URL ou anexo nesse contrato. Este consumer recebe os bytes JSON da mensagem e os desserializa; não lê um arquivo do disco nem envia documentos ao WhatsApp.
+O producer serializa `AlertaEstoqueMensagem` em JSON com o campo `email` no nível raiz e uma lista `alertas`. Este consumer recebe os bytes JSON e os desserializa; não lê arquivo do disco, não usa anexos e não depende do pacote Java do producer.
 
-Classes:
-- RabbitConfig: declara exchange durável, fila, binding e fila de falhas (DLQ).
-- AlertaEstoqueMensagem: mesmo contrato do producer, com telefone e alertas.
-- AlertaEstoqueConsumer: recebe Message e usa ObjectMapper.readValue. Ignora o cabeçalho __TypeId__ do producer, evitando depender do pacote Java dele.
-- MensagemFormatter: valida os campos, normaliza telefone e monta resumo.
-- WhatsAppService: POST HTTPS para /PHONE_NUMBER_ID/messages com Bearer token e template.
+Classes principais:
+
+- `RabbitConfig`: declara exchange durável, fila durável, binding e DLQ.
+- `AlertaEstoqueMensagem`: contrato do producer, com `email` e `alertas`.
+- `AlertaEstoqueConsumer`: recebe a mensagem, ignora o cabeçalho `__TypeId__` do producer, valida o contrato e aciona o envio.
+- `MensagemFormatter`: valida e normaliza o e-mail, valida os itens e monta o resumo em texto puro.
+- `EmailService`: envia o resumo por SMTP com o assunto `Alerta de estoque MeGusta`.
+- `MailConfigurationValidator`: falha rápido no startup se a configuração SMTP obrigatória estiver ausente ou inválida.
 
 ## 1. Configurar RabbitMQ
 
-Use o MESMO host, porta, virtual host, usuário e senha do producer. O usuário precisa de permissões para declarar exchange/fila/binding e consumir.
+Use o **mesmo** host, porta, virtual host, usuário e senha do producer. O usuário precisa de permissão para declarar exchange/fila/binding e consumir.
 
-Defaults confirmados na base: exchange `megusta.estoque`, routing key `alerta.estoque`, host `localhost`, porta `5672` e virtual host `/`. Se sobrescrever as variáveis no backend, use os mesmos valores no consumer:
+| Variável | Propriedade | Padrão | Obrigatória |
+|---|---|---|---|
+| `RABBITMQ_HOST` | `spring.rabbitmq.host` | `localhost` | não |
+| `RABBITMQ_PORT` | `spring.rabbitmq.port` | `5672` | não |
+| `RABBITMQ_USERNAME` | `spring.rabbitmq.username` | `guest` | não |
+| `RABBITMQ_PASSWORD` | `spring.rabbitmq.password` | `guest` | não |
+| `RABBITMQ_VHOST` | `spring.rabbitmq.virtual-host` | `/` | não |
+| `RABBITMQ_EXCHANGE` | `megusta.rabbitmq.exchange` | `megusta.estoque` | não |
+| `RABBITMQ_ROUTING_KEY` | `megusta.rabbitmq.routing-key` | `alerta.estoque` | não |
+| `RABBITMQ_QUEUE` | `megusta.rabbitmq.queue` | `megusta.email.alertas` | não |
 
-| Backend | Variável do consumer |
-|---|---|
-| megusta.rabbitmq.exchange | RABBITMQ_EXCHANGE |
-| megusta.rabbitmq.routing-key | RABBITMQ_ROUTING_KEY |
+A fila e a DLQ são derivadas do nome configurado em `RABBITMQ_QUEUE`:
 
-RABBITMQ_QUEUE é opcional; padrão: megusta.whatsapp.alertas. Use uma fila nova se já houver uma com argumentos diferentes; RabbitMQ rejeita redeclarações incompatíveis. Não apague uma fila com mensagens para resolver esse erro.
+- fila: `megusta.email.alertas`
+- DLX: `megusta.email.alertas.dlx`
+- DLQ: `megusta.email.alertas.dlq`
 
-Inicie o consumer ANTES de disparar o producer pela primeira vez, para criar a fila e binding. Um exchange sem fila vinculada não guarda as mensagens anteriores. O producer fornecido não configura aqui confirmação de publicação/retorno de mensagens não roteadas; isso é uma melhoria separada.
+Use uma fila nova se já existir uma fila com o mesmo nome e argumentos diferentes. O RabbitMQ rejeita redeclarações incompatíveis; não apague uma fila com mensagens para contornar esse erro.
 
-## 2. Preparar WhatsApp Cloud API
+Inicie o consumer **antes** de disparar o producer pela primeira vez, para criar a fila e o binding. Um exchange sem fila vinculada não guarda mensagens anteriores. O producer não configura confirmação de publicação/retorno de mensagens não roteadas; isso é uma melhoria separada.
 
-Este projeto assume a API oficial da Meta; Twilio, Z-API e Evolution têm contratos distintos e exigem adaptar WhatsAppService.
+## 2. Configurar o servidor SMTP
 
-No painel Meta, configure o aplicativo WhatsApp, número remetente, token válido com permissão de envio e destinatário autorizado para o teste. WHATSAPP_PHONE_NUMBER_ID é o ID do número REMETENTE no painel, não o telefone do cliente e não o WABA ID. Use somente destinatários que autorizaram as notificações.
+O consumer usa Spring Mail com autenticação e STARTTLS habilitados. Informe as credenciais do provedor SMTP por variáveis de ambiente.
 
-Crie e obtenha aprovação de um template em pt_BR com UMA variável posicional no corpo, sem cabeçalho/botões obrigatórios. Sugestão de nome: alerta_estoque_megusta. Sugestão de corpo:
+| Variável | Propriedade | Padrão | Obrigatória |
+|---|---|---|---|
+| `MAIL_HOST` | `spring.mail.host` | — | sim |
+| `MAIL_PORT` | `spring.mail.port` | `0` (inválido) | sim |
+| `MAIL_USERNAME` | `spring.mail.username` | — | sim |
+| `MAIL_PASSWORD` | `spring.mail.password` | — | sim |
+| `MAIL_FROM` | `megusta.mail.from` | — | sim |
 
-> Alerta de estoque Me Gusta: {{1}}. Confira os insumos e programe a reposição.
+O startup falha com erro de configuração quando `MAIL_HOST`, `MAIL_USERNAME`, `MAIL_PASSWORD` ou `MAIL_FROM` estão em branco, ou quando `MAIL_PORT` não está entre `1` e `65535`.
 
-Exemplo para aprovação da variável: Farinha (INS001): atual 2, mínimo 5
+Timeouts SMTP:
 
-O código envia o resumo completo nessa variável. O nome e idioma precisam coincidir com o template aprovado. A Meta decide a aprovação e categoria. Fora da janela de atendimento de 24 horas, utilize templates aprovados; este consumer usa template em todos os envios. Escolha uma versão da Graph API suportada pelo seu app e informe WHATSAPP_API_VERSION (formato vNN.0).
+- conexão: 10 s
+- leitura/escrita: 30 s
+
+### Pré-requisitos do provedor
+
+- Use uma conta SMTP autenticada e uma porta aceita pelo provedor (por exemplo, 587 com STARTTLS).
+- O endereço de `MAIL_FROM` deve ser autorizado pelo provedor.
+- Configure **SPF** e **DKIM** no domínio remetente para reduzir rejeição/spam. Idealmente configure também DMARC.
+- Não versione `MAIL_PASSWORD`. Não há carregamento automático de arquivo `.env`.
+- Provedores de teste como Mailtrap são úteis para validar o fluxo sem enviar e-mails reais.
 
 ## 3. Executar no Windows PowerShell
 
-Instale JDK 21. O Maven Wrapper baixa a distribuição configurada na base, sem exigir Maven instalado. Dentro desta pasta, defina:
+Instale o JDK 21. O Maven Wrapper baixa a distribuição configurada, sem exigir Maven instalado. Dentro desta pasta, defina as variáveis e execute:
 
 ```powershell
 $env:RABBITMQ_HOST="localhost"
@@ -59,57 +93,65 @@ $env:RABBITMQ_PASSWORD="guest"
 $env:RABBITMQ_VHOST="/"
 $env:RABBITMQ_EXCHANGE="megusta.estoque"
 $env:RABBITMQ_ROUTING_KEY="alerta.estoque"
-$env:WHATSAPP_TOKEN="TOKEN_DA_META"
-$env:WHATSAPP_PHONE_NUMBER_ID="ID_NUMERICO_DO_REMETENTE"
-$env:WHATSAPP_API_VERSION="VERSAO_SUPORTADA_NO_SEU_APP"
-$env:WHATSAPP_TEMPLATE="alerta_estoque_megusta"
-$env:WHATSAPP_LANGUAGE="pt_BR"
+$env:MAIL_HOST="smtp.seu-provedor.com"
+$env:MAIL_PORT="587"
+$env:MAIL_USERNAME="usuario-smtp"
+$env:MAIL_PASSWORD="senha-smtp"
+$env:MAIL_FROM="alertas@seu-dominio.com"
 ./mvnw.cmd test
 ./mvnw.cmd spring-boot:run
 ```
 
-Os placeholders devem ser substituídos. Não envie seu token no chat nem o versione. Também pode configurar as variáveis no Run Configuration da IDE. Não há carregamento automático de arquivo .env.
+Os placeholders devem ser substituídos. Não envie sua senha no chat nem a versione. Também é possível configurar as variáveis no Run Configuration da IDE.
 
-O guest normalmente só funciona localmente no broker. Para acesso remoto, use usuário próprio. Em produção, habilite TLS conforme sua infraestrutura (`spring.rabbitmq.ssl.enabled=true` e certificados/porta apropriados).
+O `guest` normalmente só funciona localmente no broker. Para acesso remoto, use um usuário próprio. Em produção, habilite TLS também na conexão com o RabbitMQ conforme sua infraestrutura (`spring.rabbitmq.ssl.enabled=true` e certificados/porta apropriados).
 
-## 4. Testar o fluxo
+## 4. Testar o fluxo manualmente
 
-1. Inicie RabbitMQ e o consumer com credenciais válidas.
-2. Confirme a fila e o binding no painel RabbitMQ.
-3. No backend, dispare o fluxo existente de estoque abaixo do mínimo para um destinatário de teste autorizado. Ou publique o conteúdo de exemplo-mensagem.json no exchange, com a routing key configurada e content_type application/json. Troque o telefone fictício por um número de teste com DDI + DDD + número, apenas dígitos.
-4. A variável de template receberá: `Farinha (INS001): atual 2, mínimo 5`.
-5. O log informa o ID retornado pela Meta. Isso significa ACEITO pela API, não confirmação de entrega no aparelho. Confirmação de entrega/leitura requer webhook da Meta, não incluído.
-6. Para exercitar falha sem enviar nada, publique JSON inválido. Após três tentativas, a mensagem deve ir para megusta.whatsapp.alertas.dlq. Corrija o problema antes de republicar manualmente; não há reenvio automático da DLQ.
+1. Inicie o RabbitMQ e o consumer com as credenciais SMTP e RabbitMQ válidas.
+2. Confirme no painel do RabbitMQ a fila `megusta.email.alertas`, a DLQ `megusta.email.alertas.dlq` e o binding no exchange `megusta.estoque` com routing key `alerta.estoque`.
+3. Publique o conteúdo de `exemplo-mensagem.json` no exchange `megusta.estoque` com routing key `alerta.estoque` e `content_type` `application/json`. Na interface de administração, use **Publish message**; via linha de comando:
 
-## Erros e limites
+   ```sh
+   rabbitmqadmin publish exchange=megusta.estoque routing_key=alerta.estoque \
+     payload="$(cat exemplo-mensagem.json)" properties='{"content_type":"application/json"}'
+   ```
 
-- ACK automático somente após o listener retornar com sucesso; não é `autoAck` do protocolo RabbitMQ.
-- Até três tentativas totais, com intervalos de 2 e 4 segundos. A rejeição final encaminha à DLQ declarada. Erros permanentes também usam essas três tentativas limitadas.
-- Timeouts de conexão de 10 s e requisição de 30 s. Não imprime token, telefone nem corpo da resposta de erro. HTTP 400: revise template e parâmetros; 401/403: token/permissões; 429: limite; 5xx: indisponibilidade.
-- Quantidades inválidas e listas vazias falham. Telefone deve conter DDI; o código não adivinha nem acrescenta 55. A validação sintática não confirma existência do número.
-- Resumo limitado a 800 caracteres para o template sugerido. Excedentes vão à DLQ, sem truncar itens. Para muitos insumos, implemente divisão no producer, observando os limites do template aprovado.
-- Pode haver DUPLICIDADE se a Meta aceitar o envio e houver timeout ou queda antes do ACK. O contrato original não tem ID de evento e esta implementação não promete exactly-once. Produção pode exigir eventId, registro persistente e reconciliação; deduplicação local sozinha não elimina a ambiguidade de uma chamada HTTP aceita sem resposta.
-- DLQ durável auxilia inspeção, mas não substitui políticas de alta disponibilidade, backup e monitoramento do broker.
+4. Troque o e-mail fictício do exemplo por um endereço de teste que você controla. O corpo esperado é:
 
-## Validação desta entrega
+   ```text
+   Farinha (INS001): atual 2, mínimo 5
+   ```
 
-Contrato e código revisados contra os arquivos do producer anexado. Foram incluídos testes JUnit/Mockito para conversão do contrato (inclusive __TypeId__), erro de envio, JSON inválido e lista vazia. A tentativa de `./mvnw -B test` iniciou o Maven, mas falhou antes da compilação por erro de DNS ao acessar repo.maven.apache.org para resolver o parent Spring Boot 3.5.13. Portanto os testes NÃO foram executados. O ambiente também não possui JDK 21 configurado. Nenhuma mensagem real foi enviada e não houve teste integrado com RabbitMQ ou Meta. Execute `./mvnw.cmd test` e o roteiro acima no seu ambiente antes do uso.
+5. Confira o log `E-mail de alerta de estoque aceito para <email>` e a mensagem na caixa de entrada. O log indica que o SMTP aceitou o envio; ele não confirma entrega/leitura no destinatário.
+6. Para exercitar falha sem enviar nada, publique JSON inválido ou um destinatário inválido. Após três tentativas, a mensagem deve ir para `megusta.email.alertas.dlq`. Corrija o problema antes de republicar manualmente; não há reenvio automático da DLQ.
 
-## Referências
+Para o teste com o backend, dispare o fluxo existente de estoque abaixo do mínimo. O backend publica o alerta para o e-mail do usuário mais recente (`findTopByOrderByIdDesc`).
 
-- https://docs.spring.io/spring-boot/reference/messaging/amqp.html
-- https://docs.spring.io/spring-amqp/reference/amqp/resilience-recovering-from-errors-and-broker-failures.html
-- https://developers.facebook.com/documentation/business-messaging/whatsapp/get-started
-- https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/send-messages
-- https://whatsapp.github.io/WhatsApp-Nodejs-SDK/api-reference/messages/template/
+## Retry e DLQ
 
-## Comportamento do backend identificado
+- ACK automático somente após o listener retornar com sucesso.
+- Até três tentativas totais, com intervalos crescentes de aproximadamente 2 e 4 segundos.
+- Se todas as tentativas falharem, a mensagem é rejeitada sem requeue e encaminhada para a DLQ durável `megusta.email.alertas.dlq`.
+- Erros permanentes (JSON inválido, lista vazia, item inválido, e-mail inválido, resumo acima de 800 caracteres) também passam pelas três tentativas limitadas antes da DLQ.
+- Timeouts de SMTP: 10 s para conexão e 30 s para leitura/escrita.
+- Falhas de autenticação/autorização SMTP, limite de envio e indisponibilidade do provedor são reportadas pelo log de erro do listener.
+- Pode haver **duplicidade**: se o SMTP aceitar o envio e houver timeout ou queda antes do ACK, a mensagem pode ser reenviada. O contrato não possui ID de evento e a implementação não promete exactly-once.
+- A DLQ durável auxilia inspeção, mas não substitui políticas de alta disponibilidade, backup e monitoramento do broker.
 
-`VerificacaoEstoqueScheduler` tem cron `0 0 7 * * *`: dispara às 7h no fuso da aplicação. Obtém somente o usuário mais recente (`findTopByOrderByIdDesc`) e publica para esse telefone.
+## Validação
+
+Os testes unitários cobrem o contrato JSON (com `email` e sem `telefone`), o cabeçalho `__TypeId__` do producer, a formatação/validação de e-mail e resumo, o envio via `JavaMailSender` mockado, a falha de envio, JSON inválido, lista vazia, destinatário inválido, a topologia RabbitMQ e a validação de configuração SMTP.
+
+Execute:
+
+```sh
+./mvnw test
+```
 
 ## Docker e Linux/macOS
 
-No Linux/macOS, use `./mvnw test` e `./mvnw spring-boot:run`, depois de exportar as variáveis equivalentes.
+No Linux/macOS, use `./mvnw test` e `./mvnw spring-boot:run` depois de exportar as variáveis equivalentes. Se o wrapper não estiver executável, use `bash mvnw`.
 
 Para compilar e executar via Docker (a construção também executa os testes):
 
@@ -118,4 +160,10 @@ docker build -t megusta-consumer .
 docker run --rm --env-file .env megusta-consumer
 ```
 
-Crie `.env` localmente com as mesmas variáveis da seção PowerShell, em linhas `CHAVE=valor`, sem `$env:`. Não o versione. Dentro de um container, `localhost` aponta para o próprio container: use o nome do serviço RabbitMQ na mesma rede Docker (`--network NOME_DA_REDE`) ou o endereço do broker. No Docker Desktop, um broker no computador host pode ser acessado por `host.docker.internal`. Não é necessário publicar porta para o consumer.
+Crie `.env` localmente com as mesmas variáveis das tabelas acima, em linhas `CHAVE=valor`, sem `$env:`. Não o versione. Dentro de um container, `localhost` aponta para o próprio container: use o nome do serviço RabbitMQ na mesma rede Docker (`--network NOME_DA_REDE`) ou o endereço do broker. No Docker Desktop, um broker no computador host pode ser acessado por `host.docker.internal`. Não é necessário publicar porta para o consumer.
+
+## Referências
+
+- https://docs.spring.io/spring-boot/reference/io/email.html
+- https://docs.spring.io/spring-boot/reference/messaging/amqp.html
+- https://docs.spring.io/spring-amqp/reference/amqp/resilience-recovering-from-errors-and-broker-failures.html
